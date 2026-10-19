@@ -1,0 +1,140 @@
+# Bouwt Reisbouwer voor de iPhone als ongetekende .ipa op een GitHub-Mac.
+#
+# iOS-apps kunnen alleen op macOS gecompileerd worden; dit project wordt op Windows ontwikkeld, dus
+# de Mac wordt hier geleend. De .ipa is bewust ongetekend: SideStore op de telefoon ondertekent hem
+# bij installeren met je eigen Apple ID, en elke zeven dagen opnieuw. Geen Apple Developer-account,
+# geen certificaten in de repo.
+#
+# Deze repo is OPENBAAR en bevat alleen de schil (geen app-code: de app is https://reisbouwer.nl).
+# Daardoor zijn Actions-minuten gratis en kan SideStore de release zonder inlog ophalen.
+#
+# Resultaat: release "ios-latest" met Reisbouwer.ipa en source.json (de SideStore-bron).
+
+name: Reisbouwer iPhone-app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'capacitor.config.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'www/**'
+      - 'resources/**'
+      - 'sidestore-source.mjs'
+      - '.github/workflows/ios.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reisbouwer-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Capacitor installeren
+        run: npm ci --no-audit --no-fund
+
+      - name: iOS-project maken
+        run: |
+          rm -rf ios
+          npx cap add ios
+          npx cap sync ios
+
+      - name: App-icoon en startscherm
+        run: |
+          set -e
+          ICONSET=ios/App/App/Assets.xcassets/AppIcon.appiconset
+          # Via JPEG en terug: iOS weigert een icoon met alfakanaal.
+          sips -s format jpeg -z 1024 1024 resources/icon-ios.png --out /tmp/icon.jpg >/dev/null
+          sips -s format png /tmp/icon.jpg --out "$ICONSET/AppIcon-512@2x.png" >/dev/null
+          cat > "$ICONSET/Contents.json" <<'JSON'
+          {
+            "images": [
+              { "filename": "AppIcon-512@2x.png", "idiom": "universal", "platform": "ios", "size": "1024x1024" }
+            ],
+            "info": { "author": "xcode", "version": 1 }
+          }
+          JSON
+          # Het startscherm dat iOS toont terwijl de site laadt: de drie bestanden van Capacitor vervangen.
+          for f in ios/App/App/Assets.xcassets/Splash.imageset/*.png; do cp resources/splash.png "$f"; done
+          ls "$ICONSET" ios/App/App/Assets.xcassets/Splash.imageset
+
+      - name: Naam, versie en URL-schema
+        run: |
+          PLIST=ios/App/App/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Reisbouwer" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.${{ github.run_number }}" "$PLIST" || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.${{ github.run_number }}" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" "$PLIST" || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${{ github.run_number }}" "$PLIST"
+          # Geen eigen versleuteling: scheelt een vraag bij elke export.
+          /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST" || true
+          # reisbouwer:// is hoe de systeembrowser na het inloggen met Google de app terugroept
+          # (zie README, "Inloggen met Google"). Een eigen schema, want universal links vragen een betaald account.
+          /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes array" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0 dict" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLName string nl.reisbouwer.app" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string reisbouwer" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes" "$PLIST"
+
+      - name: Compileren (ongetekend)
+        working-directory: ios/App
+        run: |
+          if [ -d App.xcworkspace ]; then TARGET="-workspace App.xcworkspace"; else TARGET="-project App.xcodeproj"; fi
+          xcodebuild $TARGET -scheme App -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build > /tmp/xcodebuild.log 2>&1 || {
+              grep -E "error:" -A3 /tmp/xcodebuild.log | head -80
+              exit 1
+            }
+          tail -20 /tmp/xcodebuild.log
+
+      - name: .ipa maken
+        working-directory: ios/App
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -qry ../../Reisbouwer.ipa Payload
+          ls -la ../../Reisbouwer.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Reisbouwer-ipa
+          path: Reisbouwer.ipa
+          retention-days: 30
+
+      - name: Publiceren naar ios-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view ios-latest >/dev/null 2>&1 || \
+            gh release create ios-latest --prerelease --title "Reisbouwer voor iPhone (laatste build)" \
+              --notes "Ongetekende .ipa. Installeer met SideStore; die ondertekent hem met je eigen Apple ID." \
+              --target "${{ github.sha }}"
+          gh release upload ios-latest Reisbouwer.ipa --clobber
+
+      # SideStore-bron: één keer toevoegen in SideStore (Sources → +), daarna verschijnt elke build als Update.
+      - name: SideStore-bron publiceren
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.run_number }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          node sidestore-source.mjs Reisbouwer.ipa
+          gh release upload ios-latest source.json --clobber

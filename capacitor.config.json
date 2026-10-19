@@ -1,0 +1,16 @@
+{
+  "appId": "nl.reisbouwer.app",
+  "appName": "Reisbouwer",
+  "webDir": "www",
+  "server": {
+    "url": "https://reisbouwer.nl",
+    "allowNavigation": ["reisbouwer.nl", "*.reisbouwer.nl"],
+    "errorPath": "offline.html"
+  },
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#F4F6F3",
+    "appendUserAgent": "ReisbouwerApp/1",
+    "limitsNavigationsToAppBoundDomains": false
+  }
+}

@@ -1,0 +1,5 @@
+node_modules/
+# Wordt elke run opnieuw gemaakt door `cap add ios`; niet bewaren.
+ios/
+*.ipa
+source.json
